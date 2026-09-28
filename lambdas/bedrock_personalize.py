@@ -2,7 +2,7 @@ import json
 import os
 import boto3
 
-MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "amazon.titan-text-express-v1")
+MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 bedrock = boto3.client("bedrock-runtime")
 
 
@@ -21,24 +21,22 @@ def handler(event, context):
     prompt = build_prompt(order)
 
     try:
-        body = json.dumps({
-            "inputText": prompt,
-            "textGenerationConfig": {
-                "maxTokenCount": 200,
+        response = bedrock.converse(
+            modelId=MODEL_ID,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"text": prompt}],
+                }
+            ],
+            inferenceConfig={
+                "maxTokens": 200,
                 "temperature": 0.7,
                 "topP": 0.9,
             },
-        })
-
-        response = bedrock.invoke_model(
-            modelId=MODEL_ID,
-            body=body,
-            contentType="application/json",
-            accept="application/json",
         )
 
-        result = json.loads(response["body"].read())
-        message = result["results"][0]["outputText"].strip()
+        message = response["output"]["message"]["content"][0]["text"].strip()
 
     except Exception as exc:  # noqa: BLE001
         message = (

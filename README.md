@@ -32,7 +32,7 @@ Desafio prático (DIO) para orquestrar o fluxo completo de um pedido de delivery
    - Inválido → grava status `pedido_invalido` no DynamoDB e encerra com `Fail`.
 2. **ProcessPayment** — simula a integração com um serviço de pagamento.
    - Recusado → grava status `pagamento_recusado` no DynamoDB e encerra com `Fail`.
-3. **PersonalizeWithBedrock** — chama o Amazon Bedrock (modelo configurável via parâmetro `BedrockModelId`, padrão `amazon.titan-text-express-v1`) para gerar uma mensagem de confirmação personalizada com base no nome do cliente e nos itens do pedido.
+3. **PersonalizeWithBedrock** — chama o Amazon Bedrock via **Converse API** (modelo configurável via parâmetro `BedrockModelId`, padrão `anthropic.claude-haiku-4-5-20251001-v1:0`) para gerar uma mensagem de confirmação personalizada com base no nome do cliente e nos itens do pedido.
    - Em caso de erro no Bedrock, um `Catch` direciona para uma mensagem padrão (`PersonalizeFallback`), garantindo que o pedido não trave.
 4. **UpdateStatus** — grava o pedido confirmado (status `confirmado`) na tabela DynamoDB `DeliveryOrders`, junto com a mensagem gerada.
 5. **NotifyCustomer** — publica a mensagem personalizada no tópico SNS `DeliveryNotifications`.
@@ -57,7 +57,7 @@ Os códigos das Lambdas também estão disponíveis separadamente, comentados, e
 
 ### Pré-requisito: habilitar o modelo no Amazon Bedrock
 
-Antes do deploy, acesse **Amazon Bedrock → Model access** no console (na região onde vai fazer o deploy, ex: `us-east-1`) e solicite acesso ao modelo `Amazon Titan Text G1 - Express` (ou outro de sua escolha, ajustando o parâmetro `BedrockModelId`).
+Antes do deploy, acesse **Amazon Bedrock → Model catalog** no console (na região onde vai fazer o deploy, ex: `us-east-1`) e solicite acesso ao modelo `Claude Haiku 4.5` (ou outro de sua escolha, ajustando o parâmetro `BedrockModelId` — desde que o modelo suporte a Converse API). Para modelos Anthropic, é necessário preencher o formulário "Submit use case details" na primeira vez.
 
 ### Opção 1 — Console AWS
 
@@ -73,7 +73,7 @@ aws cloudformation deploy \
   --template-file template.yaml \
   --stack-name assistente-delivery \
   --capabilities CAPABILITY_IAM \
-  --parameter-overrides BedrockModelId=amazon.titan-text-express-v1
+  --parameter-overrides BedrockModelId=anthropic.claude-haiku-4-5-20251001-v1:0
 ```
 
 ## 🧪 Como testar
