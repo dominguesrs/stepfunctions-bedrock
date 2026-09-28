@@ -23,8 +23,7 @@ Desafio prático (DIO) para orquestrar o fluxo completo de um pedido de delivery
                      DynamoDB (DeliveryOrders)    SNS (DeliveryNotifications)
 ```
 
-![Diagrama da máquina de estados](images/state-machine-diagram.png)
-*(print da execução no console do Step Functions — adicionar após o deploy)*
+O diagrama real da execução (Graph view do Step Functions) está na seção de Evidências abaixo (`images/execution-success.png`).
 
 ## 🔁 Fluxo do Step Functions
 
@@ -32,7 +31,7 @@ Desafio prático (DIO) para orquestrar o fluxo completo de um pedido de delivery
    - Inválido → grava status `pedido_invalido` no DynamoDB e encerra com `Fail`.
 2. **ProcessPayment** — simula a integração com um serviço de pagamento.
    - Recusado → grava status `pagamento_recusado` no DynamoDB e encerra com `Fail`.
-3. **PersonalizeWithBedrock** — chama o Amazon Bedrock via **Converse API** (modelo configurável via parâmetro `BedrockModelId`, padrão `anthropic.claude-haiku-4-5-20251001-v1:0`) para gerar uma mensagem de confirmação personalizada com base no nome do cliente e nos itens do pedido.
+3. **PersonalizeWithBedrock** — chama o Amazon Bedrock via **Converse API** (modelo configurável via parâmetro `BedrockModelId`, padrão `us.anthropic.claude-haiku-4-5-20251001-v1:0`) para gerar uma mensagem de confirmação personalizada com base no nome do cliente e nos itens do pedido.
    - Em caso de erro no Bedrock, um `Catch` direciona para uma mensagem padrão (`PersonalizeFallback`), garantindo que o pedido não trave.
 4. **UpdateStatus** — grava o pedido confirmado (status `confirmado`) na tabela DynamoDB `DeliveryOrders`, junto com a mensagem gerada.
 5. **NotifyCustomer** — publica a mensagem personalizada no tópico SNS `DeliveryNotifications`.
@@ -73,7 +72,7 @@ aws cloudformation deploy \
   --template-file template.yaml \
   --stack-name assistente-delivery \
   --capabilities CAPABILITY_IAM \
-  --parameter-overrides BedrockModelId=anthropic.claude-haiku-4-5-20251001-v1:0
+  --parameter-overrides BedrockModelId=us.anthropic.claude-haiku-4-5-20251001-v1:0
 ```
 
 ## 🧪 Como testar
