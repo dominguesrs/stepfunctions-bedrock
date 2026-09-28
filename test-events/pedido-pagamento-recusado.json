@@ -1,0 +1,7 @@
+{
+  "orderId": "1002",
+  "customerName": "Mariana",
+  "items": ["Hambúrguer Artesanal", "Batata Frita"],
+  "address": "Av. Ipiranga, 456 - Porto Alegre, RS",
+  "paymentMethod": "cartao_recusado"
+}

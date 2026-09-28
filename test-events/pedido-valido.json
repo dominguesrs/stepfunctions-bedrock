@@ -1,0 +1,7 @@
+{
+  "orderId": "1001",
+  "customerName": "Rodrigo",
+  "items": ["Pizza Margherita", "Refrigerante 2L"],
+  "address": "Rua das Flores, 123 - Porto Alegre, RS",
+  "paymentMethod": "cartao_credito"
+}

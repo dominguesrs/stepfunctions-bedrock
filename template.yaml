@@ -1,0 +1,467 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Assistente de Delivery com AWS Step Functions e Amazon Bedrock.
+  Orquestra validação de pedido, pagamento, personalização via Bedrock,
+  atualização de status (DynamoDB) e notificação ao cliente (SNS).
+
+Parameters:
+  BedrockModelId:
+    Type: String
+    Default: amazon.titan-text-express-v1
+    Description: ID do modelo Bedrock usado para gerar a mensagem personalizada.
+
+Resources:
+
+  ################################
+  # DynamoDB
+  ################################
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: DeliveryOrders
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: orderId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: orderId
+          KeyType: HASH
+
+  ################################
+  # SNS
+  ################################
+  NotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: DeliveryNotifications
+
+  ################################
+  # IAM Role - Lambdas
+  ################################
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DeliveryAssistantLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                Resource: !GetAtt OrdersTable.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationsTopic
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: '*'
+
+  ################################
+  # Lambda: ValidateOrder
+  ################################
+  ValidateOrderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: delivery-validate-order
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import json
+
+
+          REQUIRED_FIELDS = ["orderId", "customerName", "items", "address", "paymentMethod"]
+
+
+          def handler(event, context):
+              """Valida os campos obrigatórios do pedido recebido."""
+              missing = [field for field in REQUIRED_FIELDS if not event.get(field)]
+
+              if missing:
+                  return {
+                      "isValid": False,
+                      "reason": f"Campos obrigatórios ausentes: {', '.join(missing)}",
+                      "order": event,
+                  }
+
+              if not isinstance(event.get("items"), list) or len(event["items"]) == 0:
+                  return {
+                      "isValid": False,
+                      "reason": "O pedido precisa ter ao menos um item.",
+                      "order": event,
+                  }
+
+              return {
+                  "isValid": True,
+                  "reason": "Pedido válido.",
+                  "order": event,
+              }
+
+  ################################
+  # Lambda: ProcessPayment
+  ################################
+  ProcessPaymentFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: delivery-process-payment
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import random
+
+
+          def handler(event, context):
+              """
+              Simula a integração com um serviço de pagamento.
+              Regra de simulação: paymentMethod == 'cartao_recusado' força uma recusa,
+              qualquer outro método tem 90% de chance de aprovação.
+              """
+              order = event.get("order", event)
+              payment_method = order.get("paymentMethod", "")
+
+              if payment_method == "cartao_recusado":
+                  approved = False
+              else:
+                  approved = random.random() < 0.9
+
+              return {
+                  "order": order,
+                  "paymentApproved": approved,
+                  "paymentMethod": payment_method,
+                  "transactionId": f"txn-{order.get('orderId', 'unknown')}",
+              }
+
+  ################################
+  # Lambda: BedrockPersonalize
+  ################################
+  BedrockPersonalizeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: delivery-bedrock-personalize
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 20
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import boto3
+
+          MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "amazon.titan-text-express-v1")
+          bedrock = boto3.client("bedrock-runtime")
+
+
+          def build_prompt(order):
+              items = ", ".join(order.get("items", []))
+              return (
+                  f"Escreva uma mensagem curta, calorosa e personalizada para {order.get('customerName')} "
+                  f"confirmando o pedido de delivery contendo: {items}. "
+                  f"Inclua uma estimativa de tempo de entrega amigável e um tom acolhedor. "
+                  f"Responda em português, em no máximo 3 frases."
+              )
+
+
+          def handler(event, context):
+              order = event.get("order", event)
+              prompt = build_prompt(order)
+
+              try:
+                  body = json.dumps({
+                      "inputText": prompt,
+                      "textGenerationConfig": {
+                          "maxTokenCount": 200,
+                          "temperature": 0.7,
+                          "topP": 0.9,
+                      },
+                  })
+
+                  response = bedrock.invoke_model(
+                      modelId=MODEL_ID,
+                      body=body,
+                      contentType="application/json",
+                      accept="application/json",
+                  )
+
+                  result = json.loads(response["body"].read())
+                  message = result["results"][0]["outputText"].strip()
+
+              except Exception as exc:  # noqa: BLE001
+                  message = (
+                      f"Olá {order.get('customerName', 'cliente')}, seu pedido foi confirmado "
+                      f"e já está sendo preparado!"
+                  )
+                  print(f"Falha ao chamar o Bedrock, usando mensagem padrão: {exc}")
+
+              return {
+                  "order": order,
+                  "personalizedMessage": message,
+              }
+
+  ################################
+  # Lambda: UpdateStatus
+  ################################
+  UpdateStatusFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: delivery-update-status
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          ORDERS_TABLE_NAME: !Ref OrdersTable
+      Code:
+        ZipFile: |
+          import os
+          import time
+          import boto3
+
+          TABLE_NAME = os.environ.get("ORDERS_TABLE_NAME", "DeliveryOrders")
+          dynamodb = boto3.resource("dynamodb")
+
+
+          def handler(event, context):
+              order = event.get("order", event)
+              status = event.get("status", "recebido")
+
+              table = dynamodb.Table(TABLE_NAME)
+              table.put_item(
+                  Item={
+                      "orderId": str(order.get("orderId")),
+                      "customerName": order.get("customerName", ""),
+                      "items": order.get("items", []),
+                      "address": order.get("address", ""),
+                      "status": status,
+                      "personalizedMessage": event.get("personalizedMessage", ""),
+                      "updatedAt": int(time.time()),
+                  }
+              )
+
+              return {
+                  "order": order,
+                  "status": status,
+                  "personalizedMessage": event.get("personalizedMessage", ""),
+              }
+
+  ################################
+  # Lambda: NotifyCustomer
+  ################################
+  NotifyCustomerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: delivery-notify-customer
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          NOTIFICATIONS_TOPIC_ARN: !Ref NotificationsTopic
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+
+          TOPIC_ARN = os.environ.get("NOTIFICATIONS_TOPIC_ARN")
+          sns = boto3.client("sns")
+
+
+          def handler(event, context):
+              order = event.get("order", event)
+              message = event.get("personalizedMessage", "Seu pedido foi confirmado!")
+
+              sns.publish(
+                  TopicArn=TOPIC_ARN,
+                  Subject=f"Pedido {order.get('orderId')} confirmado",
+                  Message=message,
+              )
+
+              return {
+                  "orderId": order.get("orderId"),
+                  "status": "notificado",
+                  "personalizedMessage": message,
+              }
+
+  ################################
+  # IAM Role - Step Functions
+  ################################
+  StateMachineExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DeliveryAssistantStateMachinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ValidateOrderFunction.Arn
+                  - !GetAtt ProcessPaymentFunction.Arn
+                  - !GetAtt BedrockPersonalizeFunction.Arn
+                  - !GetAtt UpdateStatusFunction.Arn
+                  - !GetAtt NotifyCustomerFunction.Arn
+
+  ################################
+  # Step Functions - State Machine
+  ################################
+  DeliveryAssistantStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: AssistenteDeliveryStateMachine
+      RoleArn: !GetAtt StateMachineExecutionRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Assistente de Delivery - validação, pagamento, personalização com Bedrock, status e notificação",
+          "StartAt": "ValidateOrder",
+          "States": {
+            "ValidateOrder": {
+              "Type": "Task",
+              "Resource": "${ValidateOrderFunction.Arn}",
+              "Next": "IsOrderValid"
+            },
+            "IsOrderValid": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.isValid",
+                  "BooleanEquals": true,
+                  "Next": "ProcessPayment"
+                }
+              ],
+              "Default": "OrderInvalid"
+            },
+            "OrderInvalid": {
+              "Type": "Pass",
+              "Parameters": {
+                "order.$": "$.order",
+                "status": "pedido_invalido"
+              },
+              "Next": "UpdateStatusInvalid"
+            },
+            "UpdateStatusInvalid": {
+              "Type": "Task",
+              "Resource": "${UpdateStatusFunction.Arn}",
+              "Next": "OrderRejected"
+            },
+            "OrderRejected": {
+              "Type": "Fail",
+              "Error": "OrderValidationError",
+              "Cause": "Pedido não passou na validação."
+            },
+            "ProcessPayment": {
+              "Type": "Task",
+              "Resource": "${ProcessPaymentFunction.Arn}",
+              "Next": "IsPaymentApproved"
+            },
+            "IsPaymentApproved": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.paymentApproved",
+                  "BooleanEquals": true,
+                  "Next": "PersonalizeWithBedrock"
+                }
+              ],
+              "Default": "PaymentDeclined"
+            },
+            "PaymentDeclined": {
+              "Type": "Pass",
+              "Parameters": {
+                "order.$": "$.order",
+                "status": "pagamento_recusado"
+              },
+              "Next": "UpdateStatusDeclined"
+            },
+            "UpdateStatusDeclined": {
+              "Type": "Task",
+              "Resource": "${UpdateStatusFunction.Arn}",
+              "Next": "PaymentRejected"
+            },
+            "PaymentRejected": {
+              "Type": "Fail",
+              "Error": "PaymentDeclinedError",
+              "Cause": "Pagamento recusado."
+            },
+            "PersonalizeWithBedrock": {
+              "Type": "Task",
+              "Resource": "${BedrockPersonalizeFunction.Arn}",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.error",
+                  "Next": "PersonalizeFallback"
+                }
+              ],
+              "Next": "MarkConfirmed"
+            },
+            "PersonalizeFallback": {
+              "Type": "Pass",
+              "Parameters": {
+                "order.$": "$.order",
+                "personalizedMessage": "Seu pedido foi confirmado e já está sendo preparado!"
+              },
+              "Next": "MarkConfirmed"
+            },
+            "MarkConfirmed": {
+              "Type": "Pass",
+              "Parameters": {
+                "order.$": "$.order",
+                "personalizedMessage.$": "$.personalizedMessage",
+                "status": "confirmado"
+              },
+              "Next": "UpdateStatusConfirmed"
+            },
+            "UpdateStatusConfirmed": {
+              "Type": "Task",
+              "Resource": "${UpdateStatusFunction.Arn}",
+              "Next": "NotifyCustomer"
+            },
+            "NotifyCustomer": {
+              "Type": "Task",
+              "Resource": "${NotifyCustomerFunction.Arn}",
+              "End": true
+            }
+          }
+        }
+
+Outputs:
+  StateMachineArn:
+    Description: ARN da máquina de estados do Assistente de Delivery
+    Value: !Ref DeliveryAssistantStateMachine
+  OrdersTableName:
+    Description: Nome da tabela DynamoDB de pedidos
+    Value: !Ref OrdersTable
+  NotificationsTopicArn:
+    Description: ARN do tópico SNS de notificações
+    Value: !Ref NotificationsTopic
